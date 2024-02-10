@@ -13,27 +13,43 @@ class CaPE_6DoF:
         :return: rotated feature f by pose P: f@P
         """
         f = einops.rearrange(f, '... (d k) -> ... d k', k=4)
+        # the below f@P should be "P@f.transpose(-2,-1)).transpose(-2,-1)" or "torch.einsum('...jk,...dk', P, f)"?
         return einops.rearrange(f@P, '... d k -> ... (d k)', k=4)
 
-    def attn_with_CaPE(self, f1, f2, p1, p2):
+    def attn_with_CaPE(self, f1, f2, p1, p2, f3 = None):
         """
         Do attention dot production with CaPE pose encoding.
         # query = cape_embed(query, p_out_inv)  # query f_q @ (p_out)^(-T)
         # key = cape_embed(key, p_in)  # key f_k @ p_in
+        # value = cape_embed(value, p_in) 
+        # attn = cape_embed(attn, p_out)
         :param f1: b (t1 l) d
         :param f2: b (t2 l) d
-        :param p1: [b, t, 4, 4]
-        :param p2: [b, t, 4, 4]
-        :return: attention score: q@k.T
+        :(Optional) param f3: b (t2 l) e
+        :param p1: [b, t1, 4, 4]
+        :param p2: [b, t2, 4, 4]
+        
+        :return: 
+            (if f3 is provided): attention output: Softmax(q@k.T)v
+            (if not): attention q@k.T
         """
         l = f1.shape[1] // p1.shape[1]
         assert f1.shape[1] // p1.shape[1] == f2.shape[1] // p2.shape[1]
-        p1_invT = einops.repeat(torch.inverse(p1).permute(0, 1, 3, 2), 'b t m n -> b (t l) m n', l=l)  # f1 [b, l*t1, d]
+        p1_invT = einops.repeat(torch.inverse(p1).permute(0, 1, 3, 2), 'b t m n -> b (t l) m n', l=l)  # p1_inv.T [b, (l*t1), 4, 4]
         query = self.cape_embed(f1, p1_invT)  # [b, l*t1, d] query: f1 @ (p1)^(-T), transpose the last two dim
-        p2_copy = einops.repeat(p2, 'b t m n -> b (t l) m n', l=l) # f2 [b, l*t2, d]
+        p2_copy = einops.repeat(p2, 'b t m n -> b (t l) m n', l=l) # p2 [b, (l*t2), 4, 4]
         key = self.cape_embed(f2, p2_copy)  # [b, l*t2, d] key: f2 @ p2
         att = query @ key.permute(0, 2, 1)  # [b, l*t1, l*t2] attention: query@key^T
-        return att
+
+        if f3 is not None:
+            att = torch.softmax(att, -1) # [b, l*t1, l*t2] 
+            value = self.cape_embed(f3, p2_copy) # [b, l*t2, e] value: f3 @ p2
+            out = att @ f3 # [b, l*t1, e] attention output: Softmax(query@key^T)@value
+            p1_inv = einops.repeat(torch.inverse(p1), 'b t m n -> b (t l) m n', l=l)  # p1_inv [b, l, t1, 4, 4]
+            out = self.cape_embed(f3, p1_inv): [b, l*t1, e] out @ p1.inv
+            return out
+        else:
+            return att
 
 
 ################### 6DoF Verification ###################################
